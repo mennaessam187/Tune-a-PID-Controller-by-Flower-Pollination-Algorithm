@@ -1,0 +1,169 @@
+clc; clear all; close all;
+% Simulation time
+t_sim = 20;
+tsim = 0:0.1:t_sim;     % Time vector
+u = ones(size(tsim));   % Constant input (step)
+ns = [1 2];
+ds = [1 2 3 5];
+G = tf(ns, ds);
+% Simulate closed-loop system without PID
+G_uncontrolled = feedback(G, 1);
+y_uncontrolled = lsim(G_uncontrolled, u, tsim);
+% Plot closed-loop response without controller
+figure(1);
+plot(tsim, y_uncontrolled, "r--", "LineWidth", 1.5);
+xlabel("Time (s)");
+ylabel("Amplitude");
+title("Closed-Loop System Response (No Controller)");
+grid on;
+% FPA Parameters
+N = 20;           % Population size
+T = 30;           % Iterations
+c = 0.7;          % Step size constant
+p = 0.6;          % Probability for global pollination
+var = 3;          % PID parameters (Kp, Ki, Kd)
+% PID parameter bounds
+lb = [0, 0, 0];
+ub = [25, 10, 15];
+% Desired response value
+r_s = 1;
+% Initialize population
+x = zeros(N, var);
+for i = 1:N
+    x(i, :) = lb + rand(1, var) .* (ub - lb);
+end
+% Evaluate initial objective function (ISE + overshoot penalty)
+ffb = zeros(1, N);
+for i = 1:N
+    [Kp, Ki, Kd] = deal(x(i, 1), x(i, 2), x(i, 3));
+    Gc = pid(Kp, Ki, Kd);
+    Gcf = feedback(Gc * G, 1);
+    y = lsim(Gcf, u, tsim);
+    y = y(:);
+    overshoot = max(0, max(y) - r_s);
+    error = y - r_s;
+    ise = sum(error.^2);
+    overshoot_penalty = 50 * overshoot^2;
+    ffb(i) = ise + overshoot_penalty;
+end
+% Get global best
+[obj_Gbest, Gbest_location] = min(ffb);
+xg = x(Gbest_location, :);
+best_cf_fpa = zeros(1, T);
+% Main FPA loop
+for t = 1:T
+    for i = 1:N
+        r = rand;
+        if r < p
+            L = levy(var);
+            for w = 1:var
+                x(i, w) = xg(w) + L(w) * (x(i, w) - xg(w));
+                x(i, w) = max(lb(w), min(ub(w), x(i, w)));
+            end
+        else
+            jj = randi([1, N]);
+            while jj == i, jj = randi([1, N]); end
+            kk = randi([1, N]);
+            while kk == i || kk == jj, kk = randi([1, N]); end
+            for w = 1:var
+                x(i, w) = x(i, w) + rand * (x(jj, w) - x(kk, w));
+                x(i, w) = max(lb(w), min(ub(w), x(i, w)));
+            end
+        end
+        [Kp, Ki, Kd] = deal(x(i, 1), x(i, 2), x(i, 3));
+        Gc = pid(Kp, Ki, Kd);
+        Gcf = feedback(Gc * G, 1);
+        y = lsim(Gcf, u, tsim);
+        y = y(:);
+        overshoot = max(0, max(y) - r_s);
+        error = y - r_s;
+        ise = sum(error.^2);
+        overshoot_penalty = 50 * overshoot^2;
+        ffb(i) = ise + overshoot_penalty;
+        if ffb(i) < obj_Gbest
+            obj_Gbest = ffb(i);
+            xg = x(i, :);
+        end
+    end
+    best_cf_fpa(t) = obj_Gbest;
+    % Plot optimization progress
+    figure(2);
+    plot(1:t, best_cf_fpa(1:t), 'b', 'LineWidth', 2);
+    xlabel('Iteration');
+    ylabel('Cost Function (ISE)');
+    title('Optimization Progress');
+    grid on;
+    drawnow;
+end
+% Display final results
+disp('Cost Function (ISE):');
+disp(obj_Gbest);
+disp('Optimal PID Parameters:');
+disp(['Kp: ', num2str(xg(1))]);
+disp(['Ki: ', num2str(xg(2))]);
+disp(['Kd: ', num2str(xg(3))]);
+% Final optimized response
+Gc = pid(xg(1), xg(2), xg(3));
+Gcf = feedback(Gc * G, 1);
+y_optimized = lsim(Gcf, u, tsim);
+% Performance metrics
+rise_time = NaN;
+for i = 1:length(y_optimized)
+    if y_optimized(i) >= 0.9 * r_s
+        rise_time = tsim(i); break;
+    end
+end
+settling_time = NaN;
+for i = length(y_optimized):-1:1
+    if abs(y_optimized(i) - r_s) > 0.02 * r_s
+        settling_time = tsim(i); break;
+    end
+end
+if isnan(settling_time)
+    settling_time = tsim(end);
+end
+overshoot = max(0, 100 * (max(y_optimized) - r_s) / r_s);
+disp(['Rise Time: ', num2str(rise_time), ' seconds']);
+disp(['Settling Time: ', num2str(settling_time), ' seconds']);
+disp(['Overshoot: ', num2str(overshoot), '%']);
+% Comparison plot: no controller vs PID
+figure(3);
+plot(tsim, y_uncontrolled, 'r--', 'LineWidth', 1.5);
+hold on;
+plot(tsim, y_optimized, 'b', 'LineWidth', 2);
+plot(tsim, ones(size(tsim)), 'k:', 'LineWidth', 1);
+xlabel('Time (s)');
+ylabel('Amplitude');
+legend('Closed-loop (No Controller)', 'Optimized PID Control', 'Reference');
+title('Closed-Loop System Comparison: No Controller vs PID Controller');
+grid on;
+% Control signal calculation
+r = ones(size(tsim));
+e = r(:) - y_optimized(:);
+dt = tsim(2) - tsim(1);
+P = xg(1) * e;
+I = zeros(size(e)); integral_sum = 0;
+for i = 1:length(e)
+    integral_sum = integral_sum + e(i) * dt;
+    I(i) = xg(2) * integral_sum;
+end
+D = zeros(size(e)); D(1) = 0;
+for i = 2:length(e)
+    D(i) = xg(3) * (e(i) - e(i-1)) / dt;
+end
+u_control = P + I + D;
+% Plot control signal
+figure(4);
+plot(tsim, u_control, 'g', 'LineWidth', 2);
+xlabel('Time (s)');
+ylabel('Control Signal');
+title('PID Control Signal');
+grid on;
+% Lévy flight function
+function L = levy(d)
+    beta = 3/2;
+    sigma = (gamma(1+beta)*sin(pi*beta/2)/(gamma((1+beta)/2)*beta*2^((beta-1)/2)))^(1/beta);
+    u = randn(1,d) * sigma;
+    v = randn(1,d);
+    L = u./abs(v).^(1/beta);
+end
